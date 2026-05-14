@@ -1,30 +1,35 @@
 package com.nexius
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun SSHSftpApp() {
     val sshManager = remember { SSHManager() }
     val scope = rememberCoroutineScope()
+    val terminalScrollState = rememberScrollState()
 
     // 连接配置
     var host by remember { mutableStateOf("192.168.1.100") }
@@ -33,175 +38,204 @@ fun SSHSftpApp() {
     var password by remember { mutableStateOf("password") }
     var isConnected by remember { mutableStateOf(false) }
 
-    // 终端
+    // 终端核心
     var command by remember { mutableStateOf("") }
     var terminalOutput by remember { mutableStateOf("") }
+    var commandHistory by remember { mutableStateOf(listOf<String>()) }
+    var historyIndex by remember { mutableIntStateOf(-1) }
 
     // SFTP
     var localFilePath by remember { mutableStateOf("") }
     var remoteFileName by remember { mutableStateOf("") }
     var sftpTip by remember { mutableStateOf("") }
 
+    // 自动滚动到终端底部
+    LaunchedEffect(terminalOutput) {
+        terminalScrollState.animateScrollTo(terminalScrollState.maxValue)
+    }
+
     MaterialTheme(colors = lightColors()) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.Top,
-            horizontalAlignment = Alignment.Start
+            modifier = Modifier.fillMaxSize().padding(8.dp),
+            verticalArrangement = Arrangement.Top
         ) {
-            // 1. SSH 连接区域
+            // 顶部连接栏
             Card(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),
-                elevation = 4.dp
+                elevation = 3.dp
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("SSH 连接配置", style = MaterialTheme.typography.h6)
-
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TextField(
-                            host, { host = it },
-                            label = { Text("主机") },
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextField(
-                            port, { port = it },
-                            label = { Text("端口") },
-                            modifier = Modifier.weight(0.3f)
-                        )
-                        TextField(
-                            username, { username = it },
-                            label = { Text("用户名") },
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextField(
-                            password, { password = it },
-                            label = { Text("密码") },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                Row(
+                    modifier = Modifier.padding(10.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextField(host, { host = it }, label = { Text("主机") }, modifier = Modifier.weight(1f), singleLine = true)
+                    TextField(port, { port = it }, label = { Text("端口") }, modifier = Modifier.weight(0.4f), singleLine = true)
+                    TextField(username, { username = it }, label = { Text("用户") }, modifier = Modifier.weight(1f), singleLine = true)
+                    TextField(password, { password = it }, label = { Text("密码") }, modifier = Modifier.weight(1f), singleLine = true)
 
                     Button(
                         onClick = {
-                            if (!isConnected) {
-                                try {
-                                    sshManager.connect(host, port.toInt(), username, password)
-                                    isConnected = true
-                                    terminalOutput = "连接成功！\n"
-                                } catch (e: Exception) {
-                                    terminalOutput = "连接失败：${e.message}\n"
+                            scope.launch {
+                                if (!isConnected) {
+                                    try {
+                                        sshManager.connect(host, port.toInt(), username, password)
+                                        isConnected = true
+                                        terminalOutput = "✅ 连接成功！当前目录：${sshManager.currentRemoteDir}\n"
+                                    } catch (e: Exception) {
+                                        terminalOutput = "❌ 连接失败：${e.message}\n"
+                                    }
+                                } else {
+                                    sshManager.disconnect()
+                                    isConnected = false
+                                    terminalOutput += "\n🔌 已断开连接\n"
                                 }
-                            } else {
-                                sshManager.disconnect()
-                                isConnected = false
-                                terminalOutput = "已断开连接\n"
                             }
                         },
-                        modifier = Modifier.padding(top = 8.dp)
+                        colors = ButtonDefaults.buttonColors(
+                            backgroundColor = if (isConnected) Color(0xFFE53935) else Color(0xFF43A047)
+                        )
                     ) {
-                        Text(if (isConnected) "断开连接" else "连接 SSH")
+                        Text(if (isConnected) "断开" else "连接")
                     }
                 }
             }
 
-            // 2. 终端区域
+            Spacer(Modifier.height(8.dp))
+
+            // 终端区域（输出 + 输入 一体化）
             Card(
-                modifier = Modifier.fillMaxWidth().weight(1f).padding(bottom = 8.dp),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),
                 elevation = 4.dp
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("远程终端", style = MaterialTheme.typography.h6)
-                    Text("当前目录：${sshManager.currentRemoteDir}", color = MaterialTheme.colors.primary)
+                Column(Modifier.fillMaxSize().padding(8.dp)) {
+                    Text(
+                        "终端 - ${sshManager.currentRemoteDir}",
+                        style = MaterialTheme.typography.subtitle1,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colors.primary
+                    )
 
+                    // 终端输出框
                     Box(
-                        modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colors.background)
-                            .verticalScroll(rememberScrollState())
+                        modifier = Modifier.weight(1f)
+                            .fillMaxWidth()
+                            .background(Color(0xFF1A1A1A))
+                            .verticalScroll(terminalScrollState)
+                            .padding(8.dp)
                     ) {
                         AnsiText(terminalOutput)
                     }
 
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextField(
-                            command, { command = it },
-                            modifier = Modifier.weight(1f)
-                                // 修复：正确判断回车键
-                                .onKeyEvent { event ->
-                                    if (event.key == androidx.compose.ui.input.key.Key.Enter && isConnected && command.isNotBlank()) {
-                                        scope.launch {
-                                            val res = sshManager.executeCommand(command)
-                                            terminalOutput += "$ $command\n$res"
+                    Spacer(Modifier.height(6.dp))
+
+                    // 命令输入框（同屏、支持回车、Tab补全、上下箭头历史）
+                    TextField(
+                        value = command,
+                        onValueChange = { command = it },
+                        modifier = Modifier.fillMaxWidth()
+                            .background(Color(0xFF262626))
+                            .onKeyEvent { keyEvent ->
+                                if (!isConnected) return@onKeyEvent false
+                                val executeCmd = command
+                                when {
+                                    // 回车执行命令
+                                    keyEvent.key == Key.Enter && keyEvent.type == KeyEventType.KeyUp -> {
+
+                                        if (executeCmd.isNotBlank()) {
                                             command = ""
+                                            scope.launch {
+                                                executeInteractiveCommand(
+                                                    command = executeCmd,
+                                                    sshManager = sshManager,
+                                                    onOutput = { terminalOutput += it },
+                                                    onComplete = {
+                                                        commandHistory = commandHistory + executeCmd
+                                                        historyIndex = commandHistory.size
+                                                    }
+                                                )
+                                            }
+
                                         }
                                         true
-                                    } else {
-                                        false
                                     }
-                                },
-                            label = { Text("输入命令 (回车执行)") },
-                            enabled = isConnected
-                        )
-                        Button(onClick = {
-                            if (isConnected && command.isNotEmpty()) {
-                                scope.launch {
-                                    val res = sshManager.executeCommand(command)
-                                    terminalOutput += res
-                                    command = ""
+
+                                    // Tab 自动补全路径
+                                    keyEvent.key == Key.Tab && keyEvent.type == KeyEventType.KeyUp -> {
+                                        scope.launch {
+                                            val completed = sshManager.tabComplete(executeCmd)
+                                            if (completed.isNotEmpty()) command = completed
+                                        }
+                                        true
+                                    }
+
+                                    // 上箭头 历史命令
+                                    keyEvent.key == Key.DirectionUp && keyEvent.type == KeyEventType.KeyUp -> {
+                                        if (historyIndex > 0) {
+                                            historyIndex--
+                                            command = commandHistory[historyIndex]
+                                        }
+                                        true
+                                    }
+
+                                    // 下箭头 历史命令
+                                    keyEvent.key == Key.DirectionDown && keyEvent.type == KeyEventType.KeyUp -> {
+                                        if (historyIndex < commandHistory.size - 1) {
+                                            historyIndex++
+                                            command = commandHistory[historyIndex]
+                                        } else {
+                                            command = ""
+                                            historyIndex = commandHistory.size
+                                        }
+                                        true
+                                    }
+
+                                    else -> false
                                 }
-                            }
-                        }, enabled = isConnected) {
-                            Text("执行")
-                        }
-                    }
+                            },
+                        enabled = isConnected,
+                        placeholder = { Text("输入命令，回车执行｜Tab 补全｜↑↓ 历史", color = Color.Gray) },
+                        singleLine = true,
+                        colors = TextFieldDefaults.textFieldColors(
+                            textColor = Color.White,
+                            cursorColor = Color.White,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
+                    )
                 }
             }
 
-            // 3. SFTP 功能区域
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-                elevation = 4.dp
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("SFTP 文件传输（同步终端目录）", style = MaterialTheme.typography.h6)
-                    Text(sftpTip, color = if (sftpTip.contains("成功")) MaterialTheme.colors.primary else MaterialTheme.colors.error)
+            Spacer(Modifier.height(8.dp))
 
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextField(
-                            localFilePath, { localFilePath = it },
-                            modifier = Modifier.weight(1f),
-                            label = { Text("本地文件路径(上传) / 保存目录(下载)") },
-                            enabled = isConnected
-                        )
-                        TextField(
-                            remoteFileName, { remoteFileName = it },
-                            modifier = Modifier.weight(1f),
-                            label = { Text("远程文件名") },
-                            enabled = isConnected
-                        )
+            // SFTP 文件传输
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), elevation = 3.dp) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("SFTP 文件传输", fontWeight = FontWeight.Bold)
+                    Text(sftpTip, color = if (sftpTip.contains("成功")) Color.Green else Color.Red, maxLines = 1)
+
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextField(localFilePath, { localFilePath = it }, modifier = Modifier.weight(1f), label = { Text("本地路径") }, enabled = isConnected, singleLine = true)
+                        TextField(remoteFileName, { remoteFileName = it }, modifier = Modifier.weight(1f), label = { Text("远程文件") }, enabled = isConnected, singleLine = true)
                     }
 
-                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Button(onClick = {
-                            if (isConnected && localFilePath.isNotBlank()) {
-                                scope.launch {
-                                    sftpTip = sshManager.uploadFile(File(localFilePath))
-                                }
+                            scope.launch {
+                                sftpTip = sshManager.uploadFile(File(localFilePath))
                             }
-                        }, enabled = isConnected, modifier = Modifier.weight(1f)) {
-                            Text("上传到当前目录")
+                        }, modifier = Modifier.weight(1f), enabled = isConnected) {
+                            Text("上传")
                         }
 
                         Button(onClick = {
-                            if (isConnected && remoteFileName.isNotBlank() && localFilePath.isNotBlank()) {
-                                scope.launch {
-                                    sftpTip = sshManager.downloadFile(remoteFileName, localFilePath)
-                                }
+                            scope.launch {
+                                sftpTip = sshManager.downloadFile(remoteFileName, localFilePath)
                             }
-                        }, enabled = isConnected, modifier = Modifier.weight(1f)) {
-                            Text("从当前目录下载")
+                        }, modifier = Modifier.weight(1f), enabled = isConnected) {
+                            Text("下载")
                         }
                     }
                 }
@@ -210,35 +244,108 @@ fun SSHSftpApp() {
     }
 }
 
+// 交互式命令执行（支持 tail -f / top / 实时输出）
+suspend fun executeInteractiveCommand(
+    command: String,
+    sshManager: SSHManager,
+    onOutput: (String) -> Unit,
+    onComplete: () -> Unit
+) {
+    onOutput("\n$ $command\n")
+    sshManager.executeInteractiveCommand(command, onOutput)
+    onComplete()
+}
+
 @Composable
-fun AnsiText(text: String) {
-    val annotated = buildAnnotatedString {
-        val parts = text.split(Regex("(?=\\x1B\\[)"))
-        parts.forEach { part ->
-            if (part.startsWith("\u001B[")) {
-                val codeEnd = part.indexOf('m')
-                if (codeEnd > 0) {
-                    val code = part.substring(2, codeEnd)
-                    val content = part.substring(codeEnd + 1)
-                    val style = when (code) {
-                        "0" -> SpanStyle()
-                        "1" -> SpanStyle(fontWeight = FontWeight.Bold)
-                        "31" -> SpanStyle(color = Color.Red)
-                        "32" -> SpanStyle(color = Color.Green)
-                        "33" -> SpanStyle(color = Color.Yellow)
-                        "34" -> SpanStyle(color = Color.Blue)
-                        "36" -> SpanStyle(color = Color.Cyan)
-                        else -> SpanStyle()
-                    }
-                    withStyle(style) {
-                        append(content)
-                    }
-                }
-            } else {
-                append(part)
+fun AnsiText(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    val annotated = remember(text) { ansiToAnnotatedString(text) }
+
+    // 支持复制
+    SelectionContainer {
+        BasicText(
+            text = annotated,
+            modifier = modifier.fillMaxWidth(),
+            maxLines = Int.MAX_VALUE,
+            overflow = TextOverflow.Clip,
+            style = MaterialTheme.typography.body1.copy(fontSize = 14.sp)
+        )
+    }
+}
+
+private fun ansiToAnnotatedString(text: String): AnnotatedString {
+    val regex = Regex("""\u001B\[(\d+(;\d+)*)m""")
+    val builder = AnnotatedString.Builder()
+    var currStyle = AnsiSpanStyle()
+    var lastPos = 0
+
+    for (match in regex.findAll(text)) {
+        val plain = text.substring(lastPos, match.range.first)
+        if (plain.isNotEmpty()) {
+            builder.withStyle(currStyle.toSpanStyle()) { append(plain) }
+        }
+        val codes = match.groupValues[1].split(";").mapNotNull { it.toIntOrNull() }
+        currStyle = currStyle.applyCodes(codes)
+        lastPos = match.range.last + 1
+    }
+    val remain = text.substring(lastPos)
+    if (remain.isNotEmpty()) {
+        builder.withStyle(currStyle.toSpanStyle()) { append(remain) }
+    }
+    return builder.toAnnotatedString()
+}
+
+// ANSI 样式数据类及解析
+private data class AnsiSpanStyle(
+    val bold: Boolean = false,
+    val color: Color = Color.Unspecified
+) {
+    fun toSpanStyle(): SpanStyle = SpanStyle(
+        fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+        color = if (color != Color.Unspecified) color else Color.White
+    )
+
+    fun applyCodes(codes: List<Int>): AnsiSpanStyle {
+        var nextBold = bold
+        var nextColor = color
+
+        for (c in codes) {
+            when (c) {
+                0  -> { nextBold = false; nextColor = Color.Unspecified } // Reset
+                1  -> nextBold = true
+                in 30..37 -> nextColor = ansiColorTable[c] ?: Color.Unspecified
+                in 90..97 -> nextColor = ansiBrightColorTable[c] ?: Color.Unspecified
+                39 -> nextColor = Color.Unspecified // Default color
+                else -> {} // 留给扩展
             }
         }
+        return AnsiSpanStyle(bold = nextBold, color = nextColor)
     }
 
-    BasicText(text = annotated)
+    companion object {
+        // 常规前景色
+        val ansiColorTable = mapOf(
+            30 to Color(0xFF000000), // Black
+            31 to Color(0xFFFF5252), // Red
+            32 to Color(0xFF69F0AE), // Green
+            33 to Color(0xFFFFD740), // Yellow
+            34 to Color(0xFF40C4FF), // Blue
+            35 to Color(0xFFEA80FC), // Magenta
+            36 to Color(0xFF18FFFF), // Cyan
+            37 to Color(0xFFFFFFFF)  // White
+        )
+        // 亮色
+        val ansiBrightColorTable = mapOf(
+            90 to Color(0xFF888888), // Bright Black
+            91 to Color(0xFFFF8A80), // Bright Red
+            92 to Color(0xFFB9F6CA), // Bright Green
+            93 to Color(0xFFFFFF8D), // Bright Yellow
+            94 to Color(0xFF80D8FF), // Bright Blue
+            95 to Color(0xFFFF80AB), // Bright Magenta
+            96 to Color(0xFF84FFFF), // Bright Cyan
+            97 to Color(0xFFFFFFFF)  // Bright White
+        )
+    }
 }
